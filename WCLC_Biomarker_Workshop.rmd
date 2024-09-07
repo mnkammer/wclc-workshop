@@ -1,0 +1,856 @@
+---
+title: "Pathfinding clinically useful early diagnostics"
+author: "Michael N Kammer, PhD"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+  html_document:
+    toc: true
+    df_print: paged
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{multirow}
+- \usepackage[table,xcdraw]{xcolor}
+- \usepackage{wrapfig}
+- \usepackage{float}
+- \usepackage{colortbl}
+- \usepackage{pdflscape}
+- \usepackage{tabu}
+- \usepackage{threeparttable}
+- \usepackage{threeparttablex}
+- \usepackage[normalem]{ulem}
+- \usepackage{makecell}
+- \usepackage{xcolor}
+- \usepackage{pdflscape}
+- \usepackage{pdfpages}
+- \floatplacement{table}{H}
+always_allow_html: true
+classoption: portrait
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  include = TRUE, # whether any code or results should appear in the output
+  echo = FALSE, # whether the code should appear in the output
+  warning = FALSE, # whether warnings from the code should appear in the output
+  message = FALSE, # whether messages from the code should appear in the output
+  fig.align='center', # Automatically align figures
+  fig.width = 5 # Automatically size figures
+  ) 
+
+knitr::opts_knit$set(root.dir = "C:/Users/mnkam/OneDrive/Desktop/")
+setwd("C:/Users/mnkam/OneDrive/Desktop/")
+
+
+# Core packages for analysis
+library(glmnet)      # Regularized regression (Lasso, Ridge)
+library(ROCR)        # ROC curves and AUC calculations
+library(lmtest)      # Likelihood ratio tests
+library(readxl)      # Reading Excel files
+library(rstatix)     # Summary statistics and statistical tests
+library(ggpubr)      # Plotting with ggplot2, enhanced publication-ready plots
+library(car)         # ANOVA and other linear model tools
+library(Epi)         # Confidence intervals for model coefficients/predictions
+library(lme4)        # Linear mixed-effects models
+library(lmerTest)    # Testing in mixed-effects models
+library(splines)     # For fitting spline models
+library(caret)       # Tools for machine learning, cross-validation
+library(ggplot2)     # Core package for data visualization
+library(rms)         # Regression modeling strategies, survival analysis
+library(gridExtra)   # Arrange multiple ggplot plots
+library(mice)        # Multiple imputation for handling missing data
+library(dplyr)       # Data manipulation
+library(knitr)       # Dynamic report generation
+library(kableExtra)  # Enhanced table formatting for LaTeX/HTML
+library(pROC)        # ROC curve and AUC analysis
+library(RColorBrewer) # Color palettes for ggplot
+library(tidyverse)
+library(vtable)
+
+source("S_Reclassification_WCLC.R")
+source("S_ROC_and_PR.R")
+
+theme_set(theme_minimal() + theme(legend.position = "bottom")) # theme for ggplot
+```
+
+\newpage
+
+# Introduction
+
+This document is part of a course from the IASLC World Conference on Lung Cancer 2024 in San Diego, presented by the Early Detection Research Network. It aims to guide users through the analysis of the added value of biomarkers in diagnostic models for cancer. 
+
+The code to reproduce this pdf is available at https://github.com/mnkammer/wclc-workshop 
+
+Workshop Presenters:
+
+- Stephen A Deppen, PhD
+- Karen Anderson
+- Yency Forero-Martinez
+- Anna Barón
+- Alex Kaiser
+- Michael N Kammer
+
+```{r General Functions}
+# Function to print summary statistics
+print_summary <- function(y) {
+  cat('Patients in analysis: ', nrow(y),'\n',
+      'Cancer: ', sum(as.numeric(y)-1),'\n',
+      'Benign: ', nrow(y) - sum(as.numeric(y)-1), '\n',
+      'Prevalence: ', sum(as.numeric(y)-1)/nrow(y), '\n')
+}
+
+# Function to compute ROC curves and AUC for a biomarker
+compute_roc_auc <- function(biomarker, y) {
+  rocpred <- prediction(biomarker, y)
+  rocperf <- performance(rocpred, "tpr", "fpr")
+  auc <- performance(rocpred, measure = "auc")@y.values[[1]]
+  return(list(rocperf = rocperf, auc = auc))
+}
+
+
+```
+
+
+
+\newpage
+
+# Prologue: Understanding your data
+Load in your data and define the variables and outcomes.  After renaming and defining variables, check to ensure that the data is in the expected format.  This is easily handled by looking at the "head" of the dataframe, using head(df), which displays the top 5 rows by default.  If the data has too many variables such that the table would be too wide for the page, it can be helpful to transpose the table for this step, so that variables will be listed on each row, with the first five data points displayed to the right.
+
+
+```{r Data load and summarize}
+
+
+
+# Read data
+df1 <- read_csv('AJRCCM Dataset for IASLC Workshop.csv')
+# df1 <- df1[complete.cases(df1),]
+
+
+clinical <- c('Person.id',
+              'Age',
+              'Male',
+              'Smoking',
+              'PKY',
+              'BMI',
+              'Prior.Cancer',
+              'Nodule.Diam.mm',
+              'Nodule.Spiculation',
+              'Nodule.Upper.Lobe')
+
+biomarker<- c('Person.id',
+              "Largest.Diameter",	
+              "AntPost.Length",	
+              "L3.Distance",
+              "Area.Density",	
+              "Volume.Density",
+              "Flatness",	
+              "Joint.Entropy",	
+              "Sum.Entropy",	
+              "Dep.Entropy",
+              "Strength"
+              )
+
+
+outcome <- c('Person.id',
+             'TTD',
+             'Total.CT','Total.PET','Bronch','EBUS.NAV',
+             'Total.Inv', 'Sx','Sputum.Cytology','Fungal','TTNA')
+
+# Round data to 3 significant digits
+df1[clinical] <- lapply(df1[clinical], function(x) if(is.numeric(x)) round(x, 3) else x)
+df1[biomarker] <- lapply(df1[biomarker], function(x) if(is.numeric(x)) round(x, 3) else x)
+df1[outcome] <- lapply(df1[outcome], function(x) if(is.numeric(x)) round(x, 3) else x)
+
+# Function to transpose and format tables
+transpose_table <- function(df, caption) {
+  df_t <- as.data.frame(t(df))
+  colnames(df_t) <- df_t[1,]
+  df_t <- df_t[-1,]
+  kable(df_t, format = "latex", booktabs = TRUE, caption = caption, longtable = TRUE) %>%
+    kable_styling(latex_options = c("striped", "repeat_header"))
+}
+
+# Display transposed tables
+transpose_table(head(df1[, clinical]), "Clinical Predictors")
+
+transpose_table(head(df1[, biomarker]), "Biomarkers to Evaluate")
+
+transpose_table(head(df1[df1$cohort == 1, outcome]), "Outcome Data")
+
+
+
+
+df1$Mayo <- (0.0391 * df1$Age) +
+(0.1274 * df1$Nodule.Diam.mm) +
+(0.7917 * df1$Smoking) +
+(1.3388 * df1$Prior.Cancer) +
+(0.7838 * df1$Nodule.Upper.Lobe) +
+(1.0407 * df1$Nodule.Spiculation) - 6.8272
+
+df1$Mayo.p <- 1 / (1 + exp(-df1$Mayo))
+
+# Convert y to factor
+df1$y <- as.factor(df1$y)
+
+# Subset for complete cases by outcome, biomarker, age, and RADiomics
+df <- df1
+
+df$Male <- as.factor(df$Male)
+df[df == "#N/A"] <- NA
+
+# Function to apply the normality test and choose the appropriate statistical test
+apply_stat_test <- function(var_name) {
+  var <- df[[var_name]]
+  normality_test <- "No"
+  p_value <- NA  # Initialize p_value to avoid issues
+  test_name <- ""
+  
+  if (is.numeric(var)) {
+    p_value_normality <- shapiro.test(var)$p.value
+    normality_test <- ifelse(p_value_normality > 0.05, "Yes", "No")
+    if (p_value_normality > 0.05) {
+      # Data is normally distributed, apply t-test
+      p_value <- t.test(var ~ df$y)$p.value
+      test_name <- "t-test"
+    } else {
+      # Data is not normally distributed, apply Mann-Whitney U test
+      p_value <- wilcox.test(var ~ df$y)$p.value
+      test_name <- "Mann-Whitney"
+    }
+  } else if (is.factor(var)) {
+    # Apply Chi-Square test for binary variables
+    p_value <- chisq.test(table(var, df$y))$p.value
+    test_name <- "Chi-Square"
+  }
+  
+  # Return the results
+  return(list(p_value = round(p_value, 3), normality = normality_test, test_name = test_name))
+}
+
+# Convert binary variables to factors
+df <- df %>%
+  mutate(
+    Smoking = as.factor(Smoking),
+    Prior.Cancer = as.factor(Prior.Cancer),
+    Nodule.Spiculation = as.factor(Nodule.Spiculation),
+    Nodule.Upper.Lobe = as.factor(Nodule.Upper.Lobe)
+    # Add any other binary variables here
+  )
+
+# Your specified order of variables
+specified_order <- c(clinical[-1], biomarker[-1]) # Exclude 'Person.id' which is an identifier
+
+# Identify continuous and binary variables
+continuous_vars <- specified_order[sapply(df[specified_order], is.numeric)]
+binary_vars <- specified_order[sapply(df[specified_order], function(x) is.factor(x) || (length(unique(x)) == 2 && is.numeric(x)))]
+
+# Subset data by y
+benign_df <- df %>% filter(y == 0)
+cancer_df <- df %>% filter(y == 1)
+
+# Function to summarize continuous variables with separate Median and IQR columns
+summarize_continuous <- function(x) {
+  median_value <- sprintf("%10.1f", round(median(x, na.rm = TRUE), 1))  # Right align
+  iqr_values <- quantile(x, probs = c(0.25, 0.75), na.rm = TRUE)
+  iqr_formatted <- sprintf("%-10s", paste0("(", round(iqr_values[1], 1), " - ", round(iqr_values[2], 1), ")"))  # Left align
+  return(c(median_value, iqr_formatted))
+}
+
+# Function to summarize binary variables (Count and %)
+summarize_binary <- function(x) {
+  counts <- table(x)
+  percentages <- round(prop.table(counts) * 100, 1)
+  return(c(as.character(counts[2]), paste0(percentages[2], "%")))  # Correctly split count and percentage into Median and IQR columns
+}
+
+# Summarize the data for each group with separate Median and IQR columns
+summarize_group <- function(df) {
+  continuous_summary <- df %>%
+    summarise(across(all_of(continuous_vars), ~ summarize_continuous(.))) %>%
+    t() %>%
+    as.data.frame()
+  
+  # Split the continuous summary into separate Median and IQR columns
+  continuous_summary <- data.frame(
+    Median = as.character(continuous_summary[,1]),
+    IQR = as.character(continuous_summary[,2]),
+    row.names = rownames(continuous_summary)
+  )
+  
+  binary_summary <- df %>%
+    summarise(across(all_of(binary_vars), summarize_binary)) %>%
+    t() %>%
+    as.data.frame()
+  
+  # Ensure binary summary has two columns like continuous summary
+  binary_summary <- data.frame(
+    Median = as.character(binary_summary[,1]),
+    IQR = as.character(binary_summary[,2]),
+    row.names = rownames(binary_summary)
+  )
+  
+  # Combine continuous and binary summaries
+  combined_summary <- rbind(continuous_summary, binary_summary)
+  combined_summary$Variable <- rownames(combined_summary)
+  
+  return(combined_summary)
+}
+
+# Get summaries for benign, cancer, and all data
+benign_summary <- summarize_group(benign_df)
+cancer_summary <- summarize_group(cancer_df)
+all_summary <- summarize_group(df)
+
+# Combine all summaries into a data frame
+summary_table <- data.frame(
+  Variable = benign_summary$Variable,
+  `Benign` = benign_summary$Median,
+  `Benign IQR` = benign_summary$IQR,
+  `Cancer` = cancer_summary$Median,
+  `Cancer IQR` = cancer_summary$IQR,
+  `All` = all_summary$Median,
+  `All IQR` = all_summary$IQR,
+  stringsAsFactors = FALSE
+)
+
+# Add p-values, normality, and test names to the table
+test_results <- lapply(summary_table$Variable, function(var) {
+  apply_stat_test(var)
+})
+
+# Calculate the number of missing values for each variable
+missing_values <- sapply(df[specified_order], function(x) sum(is.na(x)))
+
+# Add the missing values column to the summary table
+summary_table$`Missing Values` <- missing_values[summary_table$Variable]
+
+
+summary_table$`P-value` <- sapply(test_results, function(res) res$p_value)
+summary_table$`Normally Distributed` <- sapply(test_results, function(res) res$normality)
+summary_table$`Test` <- sapply(test_results, function(res) res$test_name)
+
+# Exclude the 'Test' column using base R syntax
+summary_table_final <- summary_table[, !names(summary_table) %in% c("Test", "Normally Distributed")]
+
+# Add the missing values column to the final table
+summary_table_final$`Missing Values` <- summary_table$`Missing Values`
+
+# Reorder the summary table according to the specified order
+summary_table_final <- summary_table_final %>%
+  filter(Variable %in% specified_order) %>%
+  arrange(match(Variable, specified_order))
+
+# Adjust the column names to remove the prefixes
+colnames(summary_table_final) <- c(
+  "Variable", "Median", "IQR", "Median", "IQR", "Median", "IQR", "Missing", "p"
+)
+```
+
+\newpage
+\begin{landscape}
+\subsection{Population Summary Table}
+Your manuscript's "Table 1."  We advise showing the median and interquartile range for continuous variables. Clinical data is often non-normally distributed, causing mean and standard deviation to inaccurately represent the data.
+
+It is imperative that the clinical data be split by case status.  It can be helpful to include a third column showing the summary for the data in the entire cohort, but not necessary.
+
+We actually advise against including p-values in this table, as they can mislead readers into thinking that the differences in clinical predictors are an important result of the study.  However, some journals ask for them, and in case you wish to show them, they have been included in the code.
+
+```{r Summary Table}
+# Create the table using kable and add footnote for the tests
+summary_table_final %>%
+  kable("latex", 
+        booktabs = TRUE, 
+        longtable = TRUE, 
+        caption = "Summary of Variables with Statistical Tests",
+        align = c("l", "r", "l", "r", "l","r", "l", "c", "c")) %>%
+  add_header_above(c(" ", "Benign" = 2, "Cancer" = 2, "All" = 2, " " = 2)) %>%
+  kable_styling(latex_options = c("striped", "repeat_header")) %>%
+  column_spec(9, width = "4em") %>%  # Adjust the width of the P-value column
+  footnote(general = "Binary variables are represented by count (percentage), and continuous  variables are represented by median (25th - 75th percentile). P-values are calculated using t-test for normally distributed variables, Mann-Whitney U test for non-normally distributed variables, and the Chi-Square test for binary variables ",
+           threeparttable = TRUE)
+
+```
+
+\end{landscape}
+
+\newpage
+## Dealing with missing data
+
+\section{Handling Missing Data}
+
+\textbf{Introduction to Missing Data:} Handling missing data is crucial for ensuring the validity of statistical analysis. Missing data can arise due to various reasons like errors in data collection, and ignoring them can lead to biased results. It is important to recognize the type of missing data: \textit{Missing Completely at Random (MCAR)}, \textit{Missing at Random (MAR)}, and \textit{Missing Not at Random (MNAR)}.
+
+\textbf{Approaches to Handling Missing Data:}
+\begin{itemize}
+    \item \textbf{Deletion Methods:} 
+    \begin{itemize}
+        \item \textit{Listwise Deletion:} Removes any cases with missing values, which can reduce sample size.
+        \item \textit{Pairwise Deletion:} Uses all available data for each analysis, which can lead to varying sample sizes.
+    \end{itemize}
+    \item \textbf{Imputation Methods:}
+    \begin{itemize}
+        \item \textit{Mean/Median Imputation:} Replaces missing values with the mean or median, potentially distorting data distribution.
+        \item \textit{Last Observation Carried Forward (LOCF):} Uses the last observed value to fill in missing data points, common in longitudinal studies.
+    \end{itemize}
+    \item \textbf{Multiple Imputation:} Creates multiple datasets with different imputed values, analyzes each separately, and combines the results.
+\end{itemize}
+
+\textbf{Using the \texttt{mice} Package:} The \texttt{mice} package (Multivariate Imputation by Chained Equations) provides a powerful method for handling missing data via multiple imputation. 
+
+
+
+```{r MICE Imputation}
+invisible(
+  imputed_data <- mice(df, m = 5, method = 'pmm', maxit = 50, seed = 123, printFlag = FALSE)
+)
+df <- complete(imputed_data, 1)
+
+```
+
+\newpage
+## Understanding the Biomarkers
+- **Largest.Diameter**  
+  **Category**: Morphological  
+  **Description**: A measure of the largest planar diameter of the structure, which refers to the longest straight line that can fit entirely inside an XY-plane slice of the 3D structure, from edge to edge, without leaving the structure.
+
+- **AntPost.Length**  
+  **Category**: Morphological  
+  **Description**: A measure of the anterior-posterior (front-to-back) distance of the region of interest (ROI).
+
+- **L3.Distance**  
+  **Category**: Morphological  
+  **Description**: The length of the normal (L3) full principal axis, measured from edge to edge of the ROI, in millimeters. It is IBSI-consistent.
+
+- **Area.Density**  
+  **Category**: Volume Density  
+  **Description**: IBSI-consistent surface area of the ROI over the surface area of the approximate enclosing ellipsoid (AEE).
+
+- **Volume.Density**  
+  **Category**: Volume Density  
+  **Description**: IBSI-consistent volume fraction of the bounding box (AABB) occupied by the ROI.
+
+- **Flatness**  
+  **Category**: Morphological  
+  **Description**: IBSI-consistent ratio of the least principal axis to the major principal axis, where a maximum value of 1 indicates a spherical shape.
+
+- **Joint.Entropy**  
+  **Category**: Texture (GLCM)  
+  **Description**: IBSI-consistent joint entropy of the gray-level co-occurrence matrix (GLCM) of the unpadded ROI, binned for CT images, with aggregation by slice without merging.
+
+- **Sum.Entropy**  
+  **Category**: Texture (GLCM)  
+  **Description**: IBSI-consistent sum entropy of the gray-level co-occurrence matrix (GLCM) of the unpadded ROI, binned for CT images, with aggregation by slice without merging.
+
+- **Dep.Entropy**  
+  **Category**: Texture (NGLDM)  
+  **Description**: IBSI-consistent dependence entropy of the neighborhood gray-level dependence matrix (NGLDM) of the unpadded ROI, binned for CT images, with aggregation by slice and merging.
+
+- **Strength**  
+  **Category**: Texture (NGTDM)  
+  **Description**: IBSI-consistent strength of the neighborhood gray-tone difference matrix (NGTDM) of the unpadded ROI, with metrics averaged across all matrices.
+
+
+\newpage
+## Normalize/Standardize the data
+
+Normalizing of predictors is crucial when building logistic regression models, especially when the biomarkers have different scales. Without normalization, predictors with larger scales might disproportionately influence the model, making it harder for the model to converge and interpret the coefficients meaningfully.
+
+For example, in cases where one biomarker is measured in millimeters and another in a unitless ratio, their scales could vary significantly. By transforming and normalizing biomarkers to a standard normal distribution, we ensure that each biomarker contributes equally to the model, improving convergence and interpretability.
+
+Normalization helps in:
+- **Stabilizing learning**: Logistic regression can converge faster and more reliably when the features are on similar scales.
+- **Interpretability**: Coefficients in the model become more comparable since the features are standardized.
+- **Reducing bias**: It helps avoid biasing the model towards features with larger ranges.
+
+
+
+```{r Normalize Data, fig.width=8, fig.height=2}
+
+# Loop through each biomarker and apply the transformation
+for (biomarker in biomarker) {
+  # Check if the biomarker column is numeric
+  if (is.numeric(df[[biomarker]])) {
+    # Find the minimum value and add it to the biomarker (plus a small constant to avoid log(0))
+    min_value <- min(df[[biomarker]], na.rm = TRUE)
+    df[[paste0(biomarker, "T")]] <- log(df[[biomarker]] + abs(min_value) + 0.0001)
+    
+    # Normalization (Z-score transformation)
+    df[[paste0(biomarker, "T")]] <- (df[[paste0(biomarker, "T")]] - mean(df[[paste0(biomarker, "T")]], na.rm = TRUE)) / 
+                                      sd(df[[paste0(biomarker, "T")]], na.rm = TRUE)
+  } else {
+    message(paste("Skipping biomarker:", biomarker, "- Non-numeric data detected"))
+  }
+}
+
+# Now to create the plots for each biomarker before and after transformation
+plot_list <- list()  # To store plots
+
+biomarker_to_plot <- c(
+  "Largest.Diameter",	
+  "Joint.Entropy",	
+  "Strength"
+)
+
+for (biomarker in biomarker_to_plot) {
+  # Raw values plot
+  plot_raw <- ggplot(df, aes_string(x = biomarker)) +
+    geom_density(alpha = 0.5, bw = sd(df[[biomarker]], na.rm = TRUE)/5) +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+    theme_classic() +
+    theme(
+      aspect.ratio = 0.5, 
+      legend.position = "bottom", 
+      axis.text.y = element_blank(),  
+      axis.ticks.y = element_blank()  
+    ) +
+    ggtitle(paste0(biomarker, " - Raw Values"))
+  
+  # Transformed values plot
+  plot_transformed <- ggplot(df, aes_string(x = paste0(biomarker, "T"))) +
+    geom_density(alpha = 0.5, bw = sd(df[[paste0(biomarker, "T")]], na.rm = TRUE)/5) +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+    theme_classic() +
+    theme(
+      aspect.ratio = 0.5, 
+      legend.position = "bottom",  
+      axis.text.y = element_blank(),  
+      axis.ticks.y = element_blank()  
+    ) +
+    ggtitle(paste0(biomarker, " - Transformed Values"))
+  
+  # Store both plots in a list for later arrangement
+  plot_list[[biomarker]] <- ggarrange(plot_raw, plot_transformed, ncol = 2)
+}
+
+# To display the plots for all biomarkers
+for (biomarker in biomarker_to_plot) {
+  print(plot_list[[biomarker]])
+}
+
+```
+
+
+\newpage 
+\newpage
+# Building the Biomarker model
+```{r Added to MayoRCS, echo = FALSE, fig.width = 8, fig.height=8, warning= FALSE}
+
+par(pty = "s", mfrow=c(1,2))
+
+# Compute ROC curves and AUCs for each biomarker
+biomarkers <- list("Mayo", 
+                   "Largest.DiameterT",
+                   "AntPost.LengthT",
+                   "L3.DistanceT",
+                   "Area.DensityT",
+                   "Volume.DensityT",
+                   "FlatnessT",
+                   "Joint.EntropyT",
+                   "Sum.EntropyT",
+                   "Dep.EntropyT",
+                   "StrengthT")
+roc_auc_data <- lapply(biomarkers, function(biomarker) compute_roc_auc(df[[biomarker]], df$y))
+
+# Plot ROC curves
+colors <- c("blue", "black", "red","green","brown","blue", "black", "red","green","brown","blue")
+biom_plot_1 <- list("Largest.DiameterT",
+                   "AntPost.LengthT",
+                   "L3.DistanceT")
+biom_plot_2 <- list("Area.DensityT",
+                   "Volume.DensityT",
+                   "FlatnessT")
+biom_plot_3 <- list("Joint.EntropyT",
+                   "Sum.EntropyT",
+                   "Dep.EntropyT",
+                   "StrengthT")
+
+plot1 <- plot_roc_curves(roc_auc_data, biom_plot_1, colors)
+
+plot2 <- plot_roc_curves(roc_auc_data, biom_plot_2, colors)
+
+plot3 <- plot_roc_curves(roc_auc_data, biom_plot_3, colors)
+# Fit logistic regression models with splines
+RAD_model <- lrm(y ~ (Strength) + (Flatness) +
+                  (AntPost.Length) +
+                  (L3.Distance) +
+                  (Area.Density) +
+                  (Volume.Density) +
+                  (Dep.Entropy) +
+                  (Sum.Entropy),
+                data = df)
+
+predicted_RAD <- predict(RAD_model)
+bayes <- mean(predicted_RAD) - log(0.33/(1-0.33))
+predicted_RAD <- predicted_RAD - bayes
+predicted_RAD <- 1 / (1 + exp(-predicted_RAD))
+df$RAD <- predicted_RAD
+
+
+models <- list("RAD","Mayo")
+roc_auc_data <- lapply(models, function(model) {
+  predicted <- df[[model]]
+  rocpred <- prediction(predicted, df$y)
+  rocperf <- performance(rocpred, "tpr", "fpr")
+  auc_ROCR <- performance(rocpred, measure = "auc")@y.values[[1]]
+  list(rocperf = rocperf, auc = auc_ROCR)
+})
+
+plot4 <- plot_roc_curves(roc_auc_data, models, colors)
+grid.arrange(plot1, plot2, plot3, plot4, ncol = 2)
+```
+
+\newpage
+## The combined model (CBM)
+```{r CBM ROC, echo = FALSE, fig.width = 8, warning= FALSE}
+
+CBM_model <- lrm(y ~ 
+                  rcs(Mayo,3) +
+                  rcs(RAD,3) +                   
+                  rcs(BMI,3),
+                data = df)
+
+predicted_CBM <- predict(CBM_model)
+bayes <- mean(predicted_CBM) - log(0.33/(1-0.33))
+predicted_CBM <- predicted_CBM - bayes
+predicted_CBM <- 1 / (1 + exp(-predicted_CBM))
+df$CBM  <- predicted_CBM
+
+models <- list("RAD","Mayo", "CBM")
+roc_auc_data <- lapply(models, function(model) {
+  predicted <- df[[model]]
+  rocpred <- prediction(predicted, df$y)
+  rocperf <- performance(rocpred, "tpr", "fpr")
+  auc_ROCR <- performance(rocpred, measure = "auc")@y.values[[1]]
+  list(rocperf = rocperf, auc = auc_ROCR)
+})
+
+
+pr_auc_data <- lapply(models, function(biomarker) {
+  predicted <- df[[biomarker]]
+  prpred <- prediction(predicted, df$y)
+  prperf <- performance(prpred, "prec", "rec")
+  auc_pr <- performance(prpred, measure = "aucpr")@y.values[[1]]
+  list(prperf = prperf, auc = auc_pr)
+})
+
+plot1 <- plot_roc_curves(roc_auc_data, models, colors)
+plot2 <- plot_pr_curves(pr_auc_data, models,colors)
+grid.arrange(plot1, plot2, ncol = 2)
+
+```
+
+\newpage
+## Significant improvement?
+
+### Likelihood Ratio Test (LRT)
+
+The Likelihood Ratio Test (LRT) is a statistical method used to compare two nested models: a simpler model (a subset of a more complex model) and the more complex model (which includes additional parameters). The LRT helps determine whether the added parameters in the complex model significantly improve the fit of the model to the data.
+
+In the context of diagnostic models for cancer, the LRT allows us to assess whether adding new biomarkers to an existing model, such as the Mayo model, provides a statistically significant improvement in predicting cancer outcomes. Specifically, we compare the Mayo model, which includes clinical predictors, with a more comprehensive model that incorporates biomarkers. This comparison can help determine whether the biomarkers add meaningful predictive value.
+
+#### Mathematical Framework
+
+The LRT is based on the likelihood function, which measures how well the model explains the observed data. The test statistic is calculated as follows:
+
+\[
+\text{LR Statistic} = -2 \left( \log L_{\text{simpler}} - \log L_{\text{complex}} \right)
+\]
+
+Where:
+- \( L_{\text{simpler}} \) is the likelihood of the data under the simpler model.
+- \( L_{\text{complex}} \) is the likelihood of the data under the more complex model.
+
+This test statistic follows a chi-square distribution (\(\chi^2\)) with degrees of freedom equal to the difference in the number of parameters between the simpler and complex models. The null hypothesis is that the simpler model fits the data as well as the complex model, implying that the additional parameters (in this case, the biomarkers) are not necessary. If the test statistic is large enough to exceed a critical value from the \(\chi^2\) distribution, we reject the null hypothesis and conclude that the added biomarkers provide significant improvement.
+
+#### When to Use the LRT
+
+- **Nested Models**: The LRT is applicable when one model is nested within another. That is, the simpler model must be a special case of the more complex model (i.e., the complex model contains all the parameters of the simpler model, plus additional ones).
+- **Evaluating Biomarkers**: By comparing a model with only clinical variables (e.g., the Mayo model) to a combined model that includes both clinical variables and biomarkers, the LRT can assess whether the biomarkers significantly enhance the predictive accuracy of the model.
+
+#### Application to this Analysis
+
+In this document, we compare:
+- **Mayo Model**: A model that includes only clinical predictors.
+- **CBM Model**: A combined model that includes both clinical predictors from the Mayo model and additional biomarkers.
+
+The LRT allows us to formally test whether the addition of biomarkers to the Mayo model leads to a statistically significant improvement in predicting cancer outcomes.
+
+By calculating the LR statistic and comparing it to the chi-square distribution, we can quantify whether the combined biomarker model (CBM) significantly outperforms the clinical-only Mayo model. This test helps validate the added value of biomarkers in the diagnostic model.
+
+\newpage
+Likelihood ratio test for the CBM vs Mayo
+```{r LRT CBM vs Mayo, fig.width = 6, echo = FALSE}
+Mayo_model <- lrm(y ~ Mayo, data = df)
+
+lrtest(CBM_model,Mayo_model)
+``` 
+
+
+Likelihood ratio test for the CBM vs Radiomics
+```{r LRT CBM vs Rad, fig.width = 6, echo = FALSE}
+lrtest(CBM_model,RAD_model)
+```
+
+
+\newpage
+## Reclassification
+
+```{r Reclassification for added biomarkers, fig.width=7, fig.height=6, echo = FALSE}
+
+result <- calculate_nri_and_plot(df, "y", "Mayo.p", "CBM", 
+                                 c(0.1,0.7), c(0.1,0.7))
+
+result <- calculate_nri(df, "y", "Mayo.p", "CBM", 
+                        c(0.1,0.7), c(0.1,0.7))
+```
+\textbf{For Benign:} Observed = `r round(result$obs_reclass_0,4)`, Expected = `r round(result$exp_reclass_0,4)`, Net = `r round(result$cNRI_0,4)`
+
+\textbf{For Cancer:} Observed = `r round(result$obs_reclass_1,4)`, Expected = `r round(result$exp_reclass_1,4)`, Net = `r round(result$cNRI_1,4)`
+
+\newpage
+## Estimating Clinical Utility
+```{r Clinical Utility}
+
+```
+\newpage
+# Training on all available data
+## Talk about how after being satisfied with validation, train on all available data for the most robust, generalized model
+
+
+\newpage
+# Appendix: Helpful Demonstratations
+## Precision Recall
+In a case:control imbalanced population, a "good" ROC curve can be a result of simply having way more controls than cases, as long as the controls, on average, have a lower biomarker level that the cases, on average.
+
+For example, with 50 cases and 1000 controls:
+```{r PR Example 1, fig.width=8, fig.height=3}
+
+# Step 1: Generate biomarker values
+P1 <- rnorm(50, mean = 1, sd = 0.75)  # Case-positive population
+P0 <- rnorm(1000, mean = -1, sd = 1.5) # Case-negative population
+
+# Step 2: Create labels
+label_P1 <- rep(1, 50)  # Label for case-positive
+label_P0 <- rep(0, 1000)  # Label for case-negative
+
+# Step 3: Combine the populations into one data frame
+# Create a data frame for each population
+df_P1 <- data.frame(Biomarker = P1, Case = label_P1)
+df_P0 <- data.frame(Biomarker = P0, Case = label_P0)
+
+# Combine the two data frames
+P <- rbind(df_P1, df_P0)
+P$Case <- as.factor(P$Case)
+
+P$BiomarkerP <- 1/(1+exp(-P$Biomarker))
+
+roc_auc_data_PR_Example <- lapply("BiomarkerP", function(biomarker) compute_roc_auc(P[[biomarker]], P$Case))
+plot_ROC_PR_Example <-  plot_roc_curves(roc_auc_data_PR_Example,"BiomarkerP","Blue")
+
+pr_auc_data_PR_Example <- lapply("BiomarkerP", function(biomarker) {
+  predicted <- P[[biomarker]]
+  prpred <- prediction(predicted, P$Case)
+  prperf <- performance(prpred, "prec", "rec")
+  auc_pr <- performance(prpred, measure = "aucpr")@y.values[[1]]
+  list(prperf = prperf, auc = auc_pr)
+})
+plot_PR_PR_Example <- plot_pr_curves(pr_auc_data_PR_Example, "BiomarkerP","Blue")
+
+
+grid.arrange(plot_ROC_PR_Example, plot_PR_PR_Example, ncol = 2)
+
+```
+
+However, a biomarker with the exact same distribution in a population with 500 cases and 1000 controls:
+```{r PR Example 2, fig.width=8, fig.height=3}
+
+# Step 1: Generate biomarker values
+P1 <- rnorm(500, mean = 1, sd = 0.75)  # Case-positive population
+P0 <- rnorm(10000, mean = -1, sd = 1.5) # Case-negative population
+
+# Step 2: Create labels
+label_P1 <- rep(1, 500)  # Label for case-positive
+label_P0 <- rep(0, 1000)  # Label for case-negative
+
+# Step 3: Combine the populations into one data frame
+# Create a data frame for each population
+df_P1 <- data.frame(Biomarker = P1, Case = label_P1)
+df_P0 <- data.frame(Biomarker = P0, Case = label_P0)
+
+# Combine the two data frames
+P <- rbind(df_P1, df_P0)
+P$Case <- as.factor(P$Case)
+
+P$BiomarkerP <- 1/(1+exp(-P$Biomarker))
+
+roc_auc_data_PR_Example <- lapply("BiomarkerP", function(biomarker) compute_roc_auc(P[[biomarker]], P$Case))
+plot_ROC_PR_Example <-  plot_roc_curves(roc_auc_data_PR_Example,"BiomarkerP","Blue")
+
+pr_auc_data_PR_Example <- lapply("BiomarkerP", function(biomarker) {
+  predicted <- P[[biomarker]]
+  prpred <- prediction(predicted, P$Case)
+  prperf <- performance(prpred, "prec", "rec")
+  auc_pr <- performance(prpred, measure = "aucpr")@y.values[[1]]
+  list(prperf = prperf, auc = auc_pr)
+})
+plot_PR_PR_Example <- plot_pr_curves(pr_auc_data_PR_Example, "BiomarkerP","Blue")
+
+
+grid.arrange(plot_ROC_PR_Example, plot_PR_PR_Example, ncol = 2)
+
+```
+
+\newpage
+## Expected vs Observed Reclassification
+
+```{r expected vs observed reclassification, fig.width=7, fig.height=7}
+
+# Step 1: Generate biomarker values
+P1 <- rnorm(500, mean = 0.75, sd = .75)  # Case-positive population
+P0 <- rnorm(500, mean = -0.75, sd = .75) # Case-negative population
+
+# Step 2: Create labels
+label_P1 <- rep(1, 100)  # Label for case-positive
+label_P0 <- rep(0, 100)  # Label for case-negative
+
+# Step 3: Combine the populations into one data frame
+# Create a data frame for each population
+df_P1 <- data.frame(Biomarker = P1, Case = label_P1)
+df_P0 <- data.frame(Biomarker = P0, Case = label_P0)
+
+# Combine the two data frames
+P <- rbind(df_P1, df_P0)
+P$Case <- as.factor(P$Case)
+
+P$BiomarkerRand <- P$Biomarker + rnorm(length(P$Biomarker), mean = 0, sd = 0.5)
+
+P$BiomarkerP <- 1/(1+exp(-P$Biomarker))
+P$BiomarkerRandP <- 1/(1+exp(-P$BiomarkerRand))
+
+
+NRI_NoChange <- calculate_nri_and_plot(P, "Case", "BiomarkerP", "BiomarkerP", 
+                                 c(0.3,0.7), c(0.3,0.7))
+``` 
+
+\textbf{For Benign:} Observed = `r round(max(0,NRI_NoChange$obs_reclass_0),4)`, Expected = `r round(max(0,NRI_NoChange$exp_reclass_0),4)`, Net = `r round(max(0,NRI_NoChange$cNRI_0),4)`
+
+\textbf{For Cancer:} Observed = `r round(max(0,NRI_NoChange$obs_reclass_1),4)`, Expected = `r round(max(0,NRI_NoChange$exp_reclass_1),4)`, Net = `r round(max(0,NRI_NoChange$cNRI_1),4)`
+
+```{r Expected vs Observed Random}
+
+NRI_Random <- calculate_nri_and_plot(P, "Case", "BiomarkerP", "BiomarkerRandP", 
+                                 c(0.3,0.7), c(0.3,0.7))
+
+
+``` 
+
+\textbf{For Benign:} Observed = `r round(max(0,NRI_Random$obs_reclass_0),4)`, Expected = `r round(max(0,NRI_Random$exp_reclass_0),4)`, Net = `r round(max(0,NRI_Random$cNRI_0),4)`
+
+\textbf{For Cancer:} Observed = `r round(max(0,NRI_Random$obs_reclass_1),4)`, Expected = `r round(max(0,NRI_Random$exp_reclass_1),4)`, Net = `r round(max(0,NRI_Random$cNRI_1),4)`
