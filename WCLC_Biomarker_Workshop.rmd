@@ -87,14 +87,9 @@ This document is part of a course from the IASLC World Conference on Lung Cancer
 
 The code to reproduce this pdf is available at https://github.com/mnkammer/wclc-workshop 
 
-Workshop Presenters:
+The included dataset is derived from "Integrated Biomarkers for the Management of Indeterminate Pulmonary Nodules," American Journal of Respiratory and Critical Care Medicine, 2021.
 
-- Stephen A Deppen, PhD
-- Karen Anderson
-- Yency Forero-Martinez
-- Anna Barón
-- Alex Kaiser
-- Michael N Kammer
+The data included is derived from 4 cohorts (described in the above paper), alloweing you to perform training/testing/validation.
 
 ```{r General Functions}
 # Function to print summary statistics
@@ -556,10 +551,10 @@ biomarkers <- list("Mayo",
                    "Sum.EntropyT",
                    "Dep.EntropyT",
                    "StrengthT")
-roc_auc_data <- lapply(biomarkers, function(biomarker) compute_roc_auc(df[[biomarker]], df$y))
+
 
 # Plot ROC curves
-colors <- c("blue", "black", "red","green","brown","blue", "black", "red","green","brown","blue")
+colors <- c("blue", "black", "red","green")
 biom_plot_1 <- list("Largest.DiameterT",
                    "AntPost.LengthT",
                    "L3.DistanceT")
@@ -571,17 +566,23 @@ biom_plot_3 <- list("Joint.EntropyT",
                    "Dep.EntropyT",
                    "StrengthT")
 
+colors <- c("blue", "black", "red")
+roc_auc_data <- lapply(biom_plot_1, function(biomarker) compute_roc_auc(df[[biomarker]], df$y))
 plot1 <- plot_roc_curves(roc_auc_data, biom_plot_1, colors)
-
+colors <- c("blue", "black", "red")
+roc_auc_data <- lapply(biom_plot_2, function(biomarker) compute_roc_auc(df[[biomarker]], df$y))
 plot2 <- plot_roc_curves(roc_auc_data, biom_plot_2, colors)
-
+colors <- c("blue", "black", "red","green")
+roc_auc_data <- lapply(biom_plot_3, function(biomarker) compute_roc_auc(df[[biomarker]], df$y))
 plot3 <- plot_roc_curves(roc_auc_data, biom_plot_3, colors)
+
 # Fit logistic regression models with splines
-RAD_model <- lrm(y ~ (Strength) + (Flatness) +
+RAD_model <- lrm(y ~ (Strength) + 
+                   (Flatness) +
                   (AntPost.Length) +
                   (L3.Distance) +
-                  (Area.Density) +
-                  (Volume.Density) +
+                  rcs(Area.Density,3) +
+                  rcs(Volume.Density,3) +
                   (Dep.Entropy) +
                   (Sum.Entropy),
                 data = df)
@@ -617,8 +618,8 @@ CBM_model <- lrm(y ~
                 data = df)
 
 predicted_CBM <- predict(CBM_model)
-bayes <- mean(predicted_CBM) - log(0.33/(1-0.33))
-predicted_CBM <- predicted_CBM - bayes
+# bayes <- mean(predicted_CBM) - log(0.33/(1-0.33))
+# predicted_CBM <- predicted_CBM - bayes
 predicted_CBM <- 1 / (1 + exp(-predicted_CBM))
 df$CBM  <- predicted_CBM
 
@@ -715,14 +716,52 @@ result <- calculate_nri(df, "y", "Mayo.p", "CBM",
 \textbf{For Cancer:} Observed = `r round(result$obs_reclass_1,4)`, Expected = `r round(result$exp_reclass_1,4)`, Net = `r round(result$cNRI_1,4)`
 
 \newpage
-## Estimating Clinical Utility
-```{r Clinical Utility}
+## Reclassification Adjusted for Prevalence
 
+```{r Reclassification for added biomarkers with prevalence, fig.width=7, fig.height=6, echo = FALSE}
+
+CBM_model <- lrm(y ~ 
+                  rcs(Mayo,3) +
+                  rcs(RAD,3) +                   
+                  rcs(BMI,3),
+                data = df)
+
+predicted_CBM <- predict(CBM_model)
+bayes <- mean(predicted_CBM) - log(0.33/(1-0.33))
+predicted_CBM <- predicted_CBM - bayes
+predicted_CBM <- 1 / (1 + exp(-predicted_CBM))
+df$CBM_Prev  <- predicted_CBM
+
+result <- calculate_nri_and_plot(df, "y", "Mayo.p", "CBM_Prev", 
+                                 c(0.1,0.7), c(0.1,0.7))
+
+result <- calculate_nri(df, "y", "Mayo.p", "CBM_Prev", 
+                        c(0.1,0.7), c(0.1,0.7))
 ```
-\newpage
-# Training on all available data
-## Talk about how after being satisfied with validation, train on all available data for the most robust, generalized model
+\textbf{For Benign:} Observed = `r round(result$obs_reclass_0,4)`, Expected = `r round(result$exp_reclass_0,4)`, Net = `r round(result$cNRI_0,4)`
 
+\textbf{For Cancer:} Observed = `r round(result$obs_reclass_1,4)`, Expected = `r round(result$exp_reclass_1,4)`, Net = `r round(result$cNRI_1,4)`
+
+\newpage
+## Did we reclassify just by adjusting the pretest probability for our current prevalence?
+```{r Reclassification mayo adjust, fig.width=7, fig.height=6, echo = FALSE}
+
+Mayo_Refit <- lrm(y ~ Mayo,
+                data = df)
+predicted_Mayo_Refit <- predict(Mayo_Refit)
+predicted_Mayo_Refit <- 1 / (1 + exp(-predicted_Mayo_Refit))
+df$Mayo.P.Refit  <- predicted_Mayo_Refit
+
+
+result <- calculate_nri_and_plot(df, "y", "Mayo.p", "Mayo.P.Refit", 
+                                 c(0.1,0.7), c(0.1,0.7))
+
+result <- calculate_nri(df, "y", "Mayo.p", "Mayo.P.Refit", 
+                        c(0.1,0.7), c(0.1,0.7))
+```
+\textbf{For Benign:} Observed = `r round(result$obs_reclass_0,4)`, Expected = `r round(result$exp_reclass_0,4)`, Net = `r round(result$cNRI_0,4)`
+
+\textbf{For Cancer:} Observed = `r round(result$obs_reclass_1,4)`, Expected = `r round(result$exp_reclass_1,4)`, Net = `r round(result$cNRI_1,4)`
 
 \newpage
 # Appendix: Helpful Demonstratations
@@ -730,6 +769,7 @@ result <- calculate_nri(df, "y", "Mayo.p", "CBM",
 In a case:control imbalanced population, a "good" ROC curve can be a result of simply having way more controls than cases, as long as the controls, on average, have a lower biomarker level that the cases, on average.
 
 For example, with 50 cases and 1000 controls:
+
 ```{r PR Example 1, fig.width=8, fig.height=3}
 
 # Step 1: Generate biomarker values
@@ -773,7 +813,7 @@ However, a biomarker with the exact same distribution in a population with 500 c
 
 # Step 1: Generate biomarker values
 P1 <- rnorm(500, mean = 1, sd = 0.75)  # Case-positive population
-P0 <- rnorm(10000, mean = -1, sd = 1.5) # Case-negative population
+P0 <- rnorm(1000, mean = -1, sd = 1.5) # Case-negative population
 
 # Step 2: Create labels
 label_P1 <- rep(1, 500)  # Label for case-positive
@@ -839,18 +879,11 @@ NRI_NoChange <- calculate_nri_and_plot(P, "Case", "BiomarkerP", "BiomarkerP",
                                  c(0.3,0.7), c(0.3,0.7))
 ``` 
 
-\textbf{For Benign:} Observed = `r round(max(0,NRI_NoChange$obs_reclass_0),4)`, Expected = `r round(max(0,NRI_NoChange$exp_reclass_0),4)`, Net = `r round(max(0,NRI_NoChange$cNRI_0),4)`
 
-\textbf{For Cancer:} Observed = `r round(max(0,NRI_NoChange$obs_reclass_1),4)`, Expected = `r round(max(0,NRI_NoChange$exp_reclass_1),4)`, Net = `r round(max(0,NRI_NoChange$cNRI_1),4)`
-
-```{r Expected vs Observed Random}
+```{r Expected vs Observed Random, fig.width=7, fig.height=7}
 
 NRI_Random <- calculate_nri_and_plot(P, "Case", "BiomarkerP", "BiomarkerRandP", 
                                  c(0.3,0.7), c(0.3,0.7))
 
 
 ``` 
-
-\textbf{For Benign:} Observed = `r round(max(0,NRI_Random$obs_reclass_0),4)`, Expected = `r round(max(0,NRI_Random$exp_reclass_0),4)`, Net = `r round(max(0,NRI_Random$cNRI_0),4)`
-
-\textbf{For Cancer:} Observed = `r round(max(0,NRI_Random$obs_reclass_1),4)`, Expected = `r round(max(0,NRI_Random$exp_reclass_1),4)`, Net = `r round(max(0,NRI_Random$cNRI_1),4)`
